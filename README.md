@@ -1,4 +1,4 @@
-# Leviathan 🌐
+# Leviathan
 
 Leviathan is a split-stack, AI-driven B2B sourcing platform that reduces an 8-hour manual procurement workflow into a 2-minute automated process. 
 
