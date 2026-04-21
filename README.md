@@ -1,37 +1,37 @@
 # Leviathan
 
-Leviathan is a split-stack, AI-driven B2B sourcing platform that reduces an 8-hour manual procurement workflow into a 2-minute automated process. 
+**Agentic B2B supply chain sourcing platform.**
 
-Designed for enterprise supply chain optimization, the system deploys a headless browser agent to autonomously navigate vendor platforms (e.g., Alibaba), extract dynamic pricing/MOQ data, and synthesize the findings into a formalized Letter of Intent (LOI) ready for immediate dispatch.
+Leviathan is a split-stack, AI-driven B2B sourcing engine that reduces an 8-hour manual procurement workflow into a 2-minute automated process. Designed for enterprise supply chain optimization, the system deploys a headless browser agent to autonomously navigate complex vendor platforms (e.g., Alibaba), extract dynamic pricing and Minimum Order Quantity (MOQ) data, and synthesize the findings into a formalized Letter of Intent (LOI) ready for immediate SMTP dispatch.
 
-## System Architecture
+This repository demonstrates the architectural decoupling of a heavy, long-running Python AI workload from a high-frequency Next.js React client, utilizing unidirectional real-time event streaming and complex asynchronous state management.
 
-The application is built on a decoupled architecture, separating the interactive client from the heavy AI orchestration layer.
+## Decoupled Architecture & Data Pipeline
 
-### Frontend Client (`Next.js` / `React`)
-* **Core:** Next.js 16.2 (App Router), React 19, TypeScript 5.
-* **State Management:** `zustand` handles global session state (execution status, live logs, generated LOI), while React Flow manages local node/edge graph states.
-* **UI/Visualization:** Tailwind CSS 4 for styling. The core visualization relies on `@xyflow/react` for the node-based canvas (dynamically imported to bypass SSR hydration issues) and `framer-motion` for smooth state transitions. 
+The application physically isolates the client UI from the heavy DOM-rendering and LLM inference compute, communicating across network boundaries.
 
-### Backend Orchestration (`FastAPI`)
-* **Core:** Python, FastAPI, Pydantic, Uvicorn.
-* **Concurrency & Streaming:** Exposes an asynchronous `/deploy` endpoint and utilizes a custom logging handler wrapped in a `StreamingResponse` to push Server-Sent Events (SSE) to the frontend, providing real-time execution telemetry to the user.
-* **Stateless Design:** Data is handled transiently in-memory without the overhead of an ORM or persistent database, ensuring high throughput for the proof-of-concept.
+1.  **Deployment Trigger:** The Next.js client initiates a deployment sequence, simultaneously opening a unidirectional Server-Sent Events (SSE) connection (`/stream-logs`) and executing a synchronous RESTful POST request (`/deploy`) to the FastAPI backend.
+2.  **Cross-Origin Asynchronous Compute:** The FastAPI server, configured with wildcard CORS middleware, spawns an asynchronous `browser-use` task utilizing Playwright. Because browser orchestration is inherently I/O bound, execution is managed via Python's `async/await` coroutines, ensuring the Uvicorn ASGI event loop is never blocked.
+3.  **Real-Time Telemetry (SSE):** A custom Python `logging.Handler` intercepts the root logger. Using `loop.call_soon_threadsafe()`, it pipes execution logs directly into dedicated `asyncio.Queue` instances for every connected client. The Next.js client consumes these via the `EventSource` API, dynamically parsing agent tags from the string payload to update the UI heuristically.
+4.  **Synthesis and Egress:** Upon completion of the headless extraction phase, a secondary LangChain/GPT-4o pass synthesizes the unstructured data. The synchronous POST request returns the finalized LOI payload, at which point the client automatically closes the SSE stream.
 
-## The Agentic Pipeline
+## Asynchronous State & DOM Optimization
 
-While the UI conceptualizes the process as a distributed multi-agent swarm, the backend implements a highly deterministic, cost-optimized two-stage LLM pipeline using `gpt-4o`. This deliberate architectural choice prioritizes reliability and speed over the unpredictable latency of open-ended agent frameworks.
+Managing high-frequency streaming data (SSE) within React typically causes fatal DOM thrashing. Leviathan employs strict state boundaries to prevent main-thread locking.
 
-* **Stage 1: Headless Sourcing (`browser-use`)**
-  The system spins up a headless browser and directly targets pre-encoded vendor search URLs to bypass homepage popups. Vision capabilities are explicitly disabled (`use_vision=False`) to drastically reduce token consumption, and the agent is hard-capped at 10 execution steps to prevent infinite loops on complex DOMs. The agent scrolls the dynamic search results and performs a shallow extraction of `Product Title`, `Price Bounds`, and `Minimum Order Quantity (MOQ)` from the top three vendor cards.
+* **Zustand Global Store:** Global session state (execution status, live logs, generated LOI) is managed via Zustand. By utilizing selector-based subscriptions rather than Redux middleware, components only re-render when their specific state slice mutates.
+* **DOM Thrashing Prevention:** The Live Terminal component bypasses React reconciliation entirely for scroll behavior. Instead of a state-driven scroll loop, it utilizes a direct `useRef` hook (`scrollRef.current.scrollTop`) combined with Framer Motion (`animate={{ height: 'auto' }}`) to handle layout animations via GPU-accelerated transforms.
+* **SSR vs. CSR Segregation:** The application strictly separates rendering paths. Static layouts are Server-Side Rendered (SSR). However, the complex `@xyflow/react` node canvas relies on DOM measurements that do not exist on the server. To prevent fatal hydration mismatches, the Flow Canvas is dynamically imported as a client-only component (`ssr: false`).
 
-* **Stage 2: Synthesis & Output (`LangChain`)**
-  The unstructured plain-text summary from the browser agent is passed to a secondary `gpt-4o` instance. This pass standardizes the extracted data and synthesizes it into a formal Letter of Intent (LOI).
+## AI Orchestration & Fault Tolerance
 
-## Integrations & Data Flow
-* **Live Telemetry:** Upon deployment, the Next.js client opens an SSE connection to FastAPI (`/stream-logs`). Status updates heuristically trigger UI state changes (e.g., transitioning from `SCRAPING` to `NEGOTIATING`).
-* **Document Handling:** The synthesized LOI is pushed to the client via Zustand and rendered in-browser for immediate review, downloadable as a `.txt` file via Blob.
-* **Outbound Routing:** Finalized LOIs are routed through a Next.js server-side endpoint (`/api/send-email`) and dispatched to vendors via SMTP using `nodemailer`.
+LLM APIs and DOM layouts are inherently unreliable. The backend orchestrator is defensively engineered to prevent runaway costs, infinite loops, and unhandled exceptions.
+
+* **Deterministic Token Constraints:** The `browser-use` agent is configured with Vision explicitly disabled (`use_vision=False`), forcing DOM text extraction over screenshot analysis and reducing token consumption by ~80%.
+* **Hard Execution Ceilings:** To prevent the LLM from entering infinite agentic loops on complex, anti-scraping DOMs, the agent is hard-capped at a maximum of 10 execution steps (`max_steps=10`).
+* **API Reliability Handling:** The LangChain `ChatOpenAI` instance is hardcoded with `max_retries=2`, preventing the system from locking up during upstream 500 errors.
+* **Exception Trapping and Disconnects:** FastAPI generic exception catches prevent 500 status code spam. Furthermore, the orchestrator explicitly handles `asyncio.CancelledError`, trapping client disconnects mid-execution and returning a graceful mock payload to stabilize the server logs.
+* **Heuristic Routing:** Instead of relying on the LLM to navigate from the Alibaba homepage (which is heavily defended by dynamic popups), the system heuristically constructs the direct search URL query string, bypassing the initial anti-scraping perimeter entirely.
 
 ## Running Locally
 
@@ -39,7 +39,7 @@ While the UI conceptualizes the process as a distributed multi-agent swarm, the 
 
 ```bash
 # 1. Clone & Install
-git clone [https://github.com/daohhuynh/Leviathan.git](https://github.com/daohhuynh/Leviathan.git)
+git clone https://github.com/daohhuynh/Leviathan.git
 cd Leviathan
 
 # 2. Start the FastAPI Backend (Terminal 1)
@@ -51,3 +51,4 @@ fastapi dev api/main.py
 # Open a new terminal tab, ensure you are in the Leviathan directory
 npm install
 npm run dev
+```
